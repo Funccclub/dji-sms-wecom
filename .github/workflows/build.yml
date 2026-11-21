@@ -30,8 +30,9 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
+          exec 3>&1
           exec > build.log 2>&1
-          trap 'rc=$?; tail -n 150 "$GITHUB_WORKSPACE/build.log"; exit "$rc"' EXIT
+          trap 'rc=$?; tail -n 150 "$GITHUB_WORKSPACE/build.log" >&3; exit "$rc"' EXIT
           mkdir -p sdk/package/dji-sms-wecom
           cp Makefile sdk/package/dji-sms-wecom/
           cp -r files sdk/package/dji-sms-wecom/
