@@ -1,5 +1,7 @@
 #!/usr/bin/python3
 """Poll a QDC507 AT port and forward newly observed SMS to WeCom."""
+from contextlib import closing
+from datetime import datetime, timedelta, timezone
 import hashlib
 import json
 import os
@@ -15,6 +17,8 @@ import urllib.request
 
 CONFIG = '/etc/dji-sms-wecom.json'
 DB = '/etc/dji-sms-wecom-state.sqlite3'
+HISTORY_PAGE_SIZE = 25
+MAX_ROW_ID = 2**63 - 1
 GSM = '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
 EXT = {10:'\f', 20:'^', 40:'{', 41:'}', 47:'\\', 60:'[', 61:'~', 62:']', 64:'|', 101:'€'}
 
@@ -125,7 +129,12 @@ def poll(db, cfg):
             except (ValueError, IndexError, UnicodeError) as e:
                 print('Unsupported or invalid SMS, retained on modem:', type(e).__name__, flush=True)
                 continue
-            db.execute('INSERT OR IGNORE INTO sms (hash,sender,stamp,ref,total,part,body,done) VALUES (?,?,?,?,?,?,?,?)', (h,m['sender'],m['timestamp'],m['ref'],m['total'],m['part'],m['text'], int(baseline)))
+            db.execute(
+                'INSERT OR IGNORE INTO sms (hash,sender,stamp,ref,total,part,body,done,delivery_status) '
+                'VALUES (?,?,?,?,?,?,?,?,?)',
+                (h, m['sender'], m['timestamp'], m['ref'], m['total'], m['part'],
+                 m['text'], int(baseline), 'baseline' if baseline else None),
+            )
         if baseline: db.execute("INSERT INTO meta VALUES ('initialized','1')")
     if baseline:
         print('Initial SMS baseline saved; existing messages will not be forwarded.', flush=True)
@@ -143,8 +152,70 @@ def poll(db, cfg):
             continue
         text = ''.join(parts[i][6] for i in range(1,total+1))
         send(cfg, '短信来自：%s\n%s' % (group[0][1],text))
-        with db: db.executemany('UPDATE sms SET done=1 WHERE hash=?', [(r[0],) for r in group])
+        with db:
+            db.executemany("UPDATE sms SET done=1, delivery_status='sent' WHERE hash=?",
+                           [(r[0],) for r in group])
         print('SMS forwarded (%d part(s))' % total, flush=True)
+
+def init_db(db):
+    with db:
+        db.execute('BEGIN IMMEDIATE')
+        db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)')
+        db.execute(
+            'CREATE TABLE IF NOT EXISTS sms (hash TEXT PRIMARY KEY,sender TEXT,stamp TEXT,'
+            'ref INTEGER,total INTEGER,part INTEGER,body TEXT,done INTEGER,delivery_status TEXT)'
+        )
+        if 'delivery_status' not in {column[1] for column in db.execute('PRAGMA table_info(sms)')}:
+            db.execute('ALTER TABLE sms ADD COLUMN delivery_status TEXT')
+
+
+def sms_time(stamp):
+    # The modem stores the timestamp in swapped BCD, with a signed quarter-hour offset.
+    if not stamp or not re.fullmatch(r'[0-9]{12}[0-9a-f][0-9]', stamp):
+        return None
+    try:
+        year, month, day, hour, minute, second = (
+            int(stamp[i:i + 2][::-1]) for i in range(0, 12, 2)
+        )
+        units = int(stamp[12], 16)
+        offset = (int(stamp[13]) * 10 + (units & 7)) * (-15 if units & 8 else 15)
+        return datetime(2000 + year, month, day, hour, minute, second,
+                        tzinfo=timezone(timedelta(minutes=offset))).isoformat()
+    except ValueError:
+        return None
+
+
+def sms_history(cursor):
+    upper_id = MAX_ROW_ID
+    if cursor != 'latest':
+        if not re.fullmatch(r'[1-9][0-9]{0,18}', cursor) or int(cursor) > MAX_ROW_ID:
+            raise ValueError('Invalid history cursor')
+        upper_id = int(cursor) - 1
+
+    page = {'records': [], 'next_cursor': None}
+    if not os.path.exists(DB):
+        return page
+
+    with closing(sqlite3.connect('file:' + DB + '?mode=ro', uri=True)) as db:
+        columns = {column[1] for column in db.execute('PRAGMA table_info(sms)')}
+        if not columns:
+            return page
+        delivery = 'delivery_status' if 'delivery_status' in columns else 'NULL'
+        rows = db.execute(
+            f'SELECT rowid,sender,stamp,total,part,body,done,{delivery} FROM sms '
+            'WHERE rowid <= ? ORDER BY rowid DESC LIMIT ?',
+            (upper_id, HISTORY_PAGE_SIZE + 1),
+        ).fetchall()
+
+    page['records'] = [
+        {'sender': sender, 'time': sms_time(stamp), 'total': total, 'part': part,
+         'body': body, 'status': status or ('unknown' if done else 'pending')}
+        for _, sender, stamp, total, part, body, done, status in rows[:HISTORY_PAGE_SIZE]
+    ]
+    if len(rows) > HISTORY_PAGE_SIZE:
+        page['next_cursor'] = str(rows[HISTORY_PAGE_SIZE - 1][0])
+    return page
+
 
 def main():
     global cfg
@@ -153,12 +224,20 @@ def main():
     if not all(cfg.get(k) for k in ('port','corp_id','corp_secret','agent_id','to_user')):
         raise RuntimeError('Configure port and WeCom credentials before starting')
     db = sqlite3.connect(DB)
-    db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)')
-    db.execute('CREATE TABLE IF NOT EXISTS sms (hash TEXT PRIMARY KEY,sender TEXT,stamp TEXT,ref INTEGER,total INTEGER,part INTEGER,body TEXT,done INTEGER)')
-    db.commit()
+    init_db(db)
     while True:
         try: poll(db, cfg)
         except Exception as e: print('Poll failed:', type(e).__name__, str(e).split('?')[0], flush=True)
         time.sleep(max(10, int(cfg.get('poll_seconds',30))))
 
-if __name__ == '__main__': main()
+if __name__ == '__main__':
+    if len(sys.argv) == 3 and sys.argv[1] == 'history':
+        try:
+            print(json.dumps(sms_history(sys.argv[2])))
+        except (ValueError, sqlite3.Error) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
+    elif len(sys.argv) == 1:
+        main()
+    else:
+        sys.exit(2)

@@ -65,6 +65,82 @@ return view.extend({
         }).catch(function(e) { notify('无法读取状态：' + e.message, true); });
       }
     }, ['查看状态']);
+
+    var history = E('div', { 'style': 'overflow-x: auto' });
+    var historyNotice = E('p', { 'role': 'status' });
+    var historyPages = [null];
+    var nextCursor = null;
+    var historyPending = false;
+    var deliveryLabels = {
+      pending: '未推送',
+      sent: '已推送',
+      baseline: '首次读取未推送',
+      unknown: '历史状态未知'
+    };
+    function historyButton(label, onClick) {
+      return E('button', { 'class': 'btn cbi-button', 'type': 'button', 'click': onClick }, [label]);
+    }
+    var refreshHistory = historyButton('刷新记录', function() { loadHistory([null]); });
+    var newerHistory = historyButton('较新记录', function() {
+      if (historyPages.length > 1) loadHistory(historyPages.slice(0, -1));
+    });
+    var olderHistory = historyButton('较早记录', function() {
+      if (nextCursor) loadHistory(historyPages.concat(nextCursor));
+    });
+    function updateHistoryButtons() {
+      refreshHistory.disabled = historyPending;
+      newerHistory.disabled = historyPending || historyPages.length === 1;
+      olderHistory.disabled = historyPending || !nextCursor;
+    }
+    function renderHistory(records) {
+      if (!records.length) {
+        history.replaceChildren();
+        historyNotice.textContent = '暂无短信记录。';
+        return;
+      }
+      var headings = ['短信时间', '发件人', '短信内容', '推送状态'].map(function(label) {
+        return E('th', { 'scope': 'col' }, [label]);
+      });
+      var rows = records.map(function(record) {
+        var time = record.time ? record.time.slice(0, 19).replace('T', ' ') + ' ' + record.time.slice(19) : '—';
+        var content = [record.body];
+        if (record.total > 1) {
+          content.push(E('div', { 'class': 'cbi-value-description' },
+            ['第 ' + record.part + '/' + record.total + ' 段']));
+        }
+        return E('tr', {}, [
+          E('td', {}, [time]),
+          E('td', {}, [record.sender]),
+          E('td', { 'style': 'white-space: pre-wrap; overflow-wrap: anywhere' }, content),
+          E('td', {}, [deliveryLabels[record.status] || deliveryLabels.unknown])
+        ]);
+      });
+      history.replaceChildren(E('table', { 'class': 'table' }, [
+        E('thead', {}, [E('tr', {}, headings)]),
+        E('tbody', {}, rows)
+      ]));
+      historyNotice.textContent = '';
+    }
+    function loadHistory(pages) {
+      if (historyPending) return;
+      historyPending = true;
+      updateHistoryButtons();
+      historyNotice.textContent = '正在读取短信记录…';
+      return fs.exec(controlPath, ['history', pages[pages.length - 1] || 'latest']).then(function(res) {
+        if (res.code !== 0) throw new Error('history command failed');
+        var page = JSON.parse(res.stdout);
+        renderHistory(page.records);
+        historyPages = pages;
+        nextCursor = page.next_cursor;
+      }).catch(function() {
+        historyNotice.textContent = '无法读取短信记录。请刷新记录后重试。';
+      }).finally(function() {
+        historyPending = false;
+        updateHistoryButtons();
+      });
+    }
+    loadHistory(historyPages);
+
     return E('div', { 'class': 'cbi-map' }, [
       E('h2', {}, ['大疆短信转发']),
       E('p', {}, ['通过大疆 4G 模块读取新短信并发送到企业微信自建应用。首次启动会跳过现有短信；不会自动删除短信。']),
@@ -76,7 +152,13 @@ return view.extend({
         field('agent_id', '应用 AgentId', 'text', '', '自建应用的数字 AgentId。'),
         field('to_user', '接收成员 UserID', 'text', '', '多个成员用 | 分隔；@all 会发送给应用可见范围内的所有成员。')
       ]),
-      E('div', { 'class': 'cbi-page-actions' }, [save, ' ', stop, ' ', status])
+      E('div', { 'class': 'cbi-page-actions' }, [save, ' ', stop, ' ', status]),
+      E('div', { 'class': 'cbi-section' }, [
+        E('h3', {}, ['短信记录']),
+        E('p', {}, [refreshHistory, ' ', newerHistory, ' ', olderHistory]),
+        historyNotice,
+        history
+      ])
     ]);
   },
   handleSave: null,
