@@ -1,0 +1,8 @@
+{
+  "port": "/dev/ttyUSB2",
+  "poll_seconds": 30,
+  "corp_id": "",
+  "corp_secret": "",
+  "agent_id": "",
+  "to_user": ""
+}

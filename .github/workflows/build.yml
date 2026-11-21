@@ -1,0 +1,47 @@
+name: Build OpenWrt IPK
+on:
+  push:
+  workflow_dispatch:
+  pull_request:
+permissions:
+  contents: read
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Test decoder and forwarding logic
+        run: python3 -m unittest discover -s tests -v
+      - name: Install SDK dependencies
+        run: sudo apt-get update && sudo apt-get install -y build-essential clang flex bison g++ gawk gcc-multilib g++-multilib gettext git libncurses-dev libssl-dev rsync unzip zstd file wget
+      - name: Download verified OpenWrt 24.10.8 SDK
+        shell: bash
+        run: |
+          set -euo pipefail
+          base=https://downloads.openwrt.org/releases/24.10.8/targets/bcm27xx/bcm2711
+          curl -fsSLO "$base/sha256sums"
+          file=$(awk '{print $2}' sha256sums | grep -E '^openwrt-sdk-24\.10\.8-bcm27xx-bcm2711_.*\.Linux-x86_64\.tar\.zst$')
+          test -n "$file"
+          curl -fsSLO "$base/$file"
+          grep -F "  $file" sha256sums | sha256sum -c -
+          mkdir sdk
+          tar --zstd -xf "$file" -C sdk --strip-components=1
+      - name: Build package
+        shell: bash
+        run: |
+          set -euo pipefail
+          mkdir -p sdk/package/dji-sms-wecom
+          cp Makefile sdk/package/dji-sms-wecom/
+          cp -r files sdk/package/dji-sms-wecom/
+          cd sdk
+          ./scripts/feeds update packages
+          ./scripts/feeds install -a -p packages
+          echo 'CONFIG_PACKAGE_dji-sms-wecom=m' > .config
+          make defconfig
+          make package/dji-sms-wecom/compile -j2 V=s
+          find bin/packages -name 'dji-sms-wecom_*.ipk' -print -quit | grep .
+      - uses: actions/upload-artifact@v4
+        with:
+          name: dji-sms-wecom-ipk
+          path: sdk/bin/packages/**/dji-sms-wecom_*.ipk
+          if-no-files-found: error
