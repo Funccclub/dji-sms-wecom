@@ -41,7 +41,7 @@ jobs:
           ./scripts/feeds install -a -p packages
           printf '%s\n' 'CONFIG_ALL_NONSHARED=n' 'CONFIG_ALL_KMODS=n' 'CONFIG_PACKAGE_dji-sms-wecom=m' > .config
           make defconfig
-          make package/dji-sms-wecom/compile -j1 V=s
+          make package/dji-sms-wecom/compile -j1 V=s NO_DEPS=1
           find bin/packages -name 'dji-sms-wecom_*.ipk' -print -quit | grep .
       - uses: actions/upload-artifact@v4
         with:
