@@ -39,7 +39,7 @@ jobs:
           cd sdk
           ./scripts/feeds update packages
           ./scripts/feeds install -a -p packages
-          echo 'CONFIG_PACKAGE_dji-sms-wecom=m' > .config
+          printf '%s\n' 'CONFIG_ALL_NONSHARED=n' 'CONFIG_ALL_KMODS=n' 'CONFIG_PACKAGE_dji-sms-wecom=m' > .config
           make defconfig
           make package/dji-sms-wecom/compile -j1 V=s
           find bin/packages -name 'dji-sms-wecom_*.ipk' -print -quit | grep .
