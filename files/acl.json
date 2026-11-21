@@ -1,15 +1,21 @@
 {
   "luci-app-dji-sms-wecom": {
     "description": "Configure DJI SMS forwarding and view SMS history",
-    "read": { "file": {
-      "/etc/dji-sms-wecom.json": ["read"],
-      "/usr/libexec/dji-sms-wecom-control status": ["exec"],
-      "/usr/libexec/dji-sms-wecom-control history *": ["exec"]
-    } },
-    "write": { "file": {
-      "/etc/dji-sms-wecom.json": ["write"],
-      "/usr/libexec/dji-sms-wecom-control start": ["exec"],
-      "/usr/libexec/dji-sms-wecom-control stop": ["exec"]
-    } }
+    "read": {
+      "ubus": { "file": ["read", "exec"] },
+      "file": {
+        "/etc/dji-sms-wecom.json": ["read"],
+        "/usr/libexec/dji-sms-wecom-control status": ["exec"],
+        "/usr/libexec/dji-sms-wecom-control history *": ["exec"]
+      }
+    },
+    "write": {
+      "ubus": { "file": ["write", "exec"] },
+      "file": {
+        "/etc/dji-sms-wecom.json": ["write"],
+        "/usr/libexec/dji-sms-wecom-control start": ["exec"],
+        "/usr/libexec/dji-sms-wecom-control stop": ["exec"]
+      }
+    }
   }
 }
