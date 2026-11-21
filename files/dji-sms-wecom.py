@@ -17,6 +17,7 @@ import urllib.request
 
 CONFIG = '/etc/dji-sms-wecom.json'
 DB = '/etc/dji-sms-wecom-state.sqlite3'
+RETENTION_SECONDS = 7 * 24 * 60 * 60
 HISTORY_PAGE_SIZE = 25
 MAX_ROW_ID = 2**63 - 1
 GSM = '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
@@ -119,6 +120,13 @@ def send(cfg, content):
         raise RuntimeError('WeCom send rejected: %s' % result.get('errcode'))
 
 def poll(db, cfg):
+    now = int(time.time())
+    with db:
+        db.execute('INSERT OR IGNORE INTO expired_sms (hash) SELECT hash FROM sms WHERE expires_at <= ?', (now,))
+        removed = db.execute('DELETE FROM sms WHERE expires_at <= ?', (now,)).rowcount
+    if removed:
+        print('Expired SMS records removed: %d' % removed, flush=True)
+
     with Modem() as modem: messages = modem.list_sms()
     baseline = db.execute("SELECT value FROM meta WHERE key='initialized'").fetchone() is None
     with db:
@@ -129,11 +137,14 @@ def poll(db, cfg):
             except (ValueError, IndexError, UnicodeError) as e:
                 print('Unsupported or invalid SMS, retained on modem:', type(e).__name__, flush=True)
                 continue
+            expires_at = sms_expiry(m['timestamp'], now)
+            if expires_at <= now:
+                continue
             db.execute(
-                'INSERT OR IGNORE INTO sms (hash,sender,stamp,ref,total,part,body,done,delivery_status) '
-                'VALUES (?,?,?,?,?,?,?,?,?)',
+                'INSERT OR IGNORE INTO sms (hash,sender,stamp,ref,total,part,body,done,delivery_status,expires_at) '
+                'SELECT ?,?,?,?,?,?,?,?,?,? WHERE NOT EXISTS (SELECT 1 FROM expired_sms WHERE hash=?)',
                 (h, m['sender'], m['timestamp'], m['ref'], m['total'], m['part'],
-                 m['text'], int(baseline), 'baseline' if baseline else None),
+                 m['text'], int(baseline), 'baseline' if baseline else None, expires_at, h),
             )
         if baseline: db.execute("INSERT INTO meta VALUES ('initialized','1')")
     if baseline:
@@ -158,18 +169,30 @@ def poll(db, cfg):
         print('SMS forwarded (%d part(s))' % total, flush=True)
 
 def init_db(db):
+    db.execute('PRAGMA secure_delete=ON')
     with db:
         db.execute('BEGIN IMMEDIATE')
         db.execute('CREATE TABLE IF NOT EXISTS meta (key TEXT PRIMARY KEY, value TEXT)')
         db.execute(
             'CREATE TABLE IF NOT EXISTS sms (hash TEXT PRIMARY KEY,sender TEXT,stamp TEXT,'
-            'ref INTEGER,total INTEGER,part INTEGER,body TEXT,done INTEGER,delivery_status TEXT)'
+            'ref INTEGER,total INTEGER,part INTEGER,body TEXT,done INTEGER,delivery_status TEXT,expires_at INTEGER)'
         )
-        if 'delivery_status' not in {column[1] for column in db.execute('PRAGMA table_info(sms)')}:
+        columns = {column[1] for column in db.execute('PRAGMA table_info(sms)')}
+        if 'delivery_status' not in columns:
             db.execute('ALTER TABLE sms ADD COLUMN delivery_status TEXT')
+        if 'expires_at' not in columns:
+            db.execute('ALTER TABLE sms ADD COLUMN expires_at INTEGER')
+            now = int(time.time())
+            db.executemany(
+                'UPDATE sms SET expires_at=? WHERE rowid=?',
+                [(sms_expiry(stamp, now), rowid) for rowid, stamp in db.execute('SELECT rowid,stamp FROM sms')],
+            )
+        db.execute('CREATE INDEX IF NOT EXISTS sms_expiry_index ON sms(expires_at)')
+        # The modem may keep returning expired records. Keep only the deduplication hashes.
+        db.execute('CREATE TABLE IF NOT EXISTS expired_sms (hash TEXT PRIMARY KEY) WITHOUT ROWID')
 
 
-def sms_time(stamp):
+def parse_sms_time(stamp):
     # The modem stores the timestamp in swapped BCD, with a signed quarter-hour offset.
     if not stamp or not re.fullmatch(r'[0-9]{12}[0-9a-f][0-9]', stamp):
         return None
@@ -180,9 +203,19 @@ def sms_time(stamp):
         units = int(stamp[12], 16)
         offset = (int(stamp[13]) * 10 + (units & 7)) * (-15 if units & 8 else 15)
         return datetime(2000 + year, month, day, hour, minute, second,
-                        tzinfo=timezone(timedelta(minutes=offset))).isoformat()
+                        tzinfo=timezone(timedelta(minutes=offset)))
     except ValueError:
         return None
+
+
+def sms_time(stamp):
+    value = parse_sms_time(stamp)
+    return value.isoformat() if value else None
+
+
+def sms_expiry(stamp, fallback_time):
+    value = parse_sms_time(stamp)
+    return (int(value.timestamp()) if value else fallback_time) + RETENTION_SECONDS
 
 
 def sms_history(cursor):
@@ -201,10 +234,12 @@ def sms_history(cursor):
         if not columns:
             return page
         delivery = 'delivery_status' if 'delivery_status' in columns else 'NULL'
+        active_filter = ' AND expires_at > ?' if 'expires_at' in columns else ''
+        params = (upper_id, int(time.time())) if active_filter else (upper_id,)
         rows = db.execute(
             f'SELECT rowid,sender,stamp,total,part,body,done,{delivery} FROM sms '
-            'WHERE rowid <= ? ORDER BY rowid DESC LIMIT ?',
-            (upper_id, HISTORY_PAGE_SIZE + 1),
+            f'WHERE rowid <= ?{active_filter} ORDER BY rowid DESC LIMIT ?',
+            (*params, HISTORY_PAGE_SIZE + 1),
         ).fetchall()
 
     page['records'] = [

@@ -155,6 +155,7 @@ return view.extend({
       E('div', { 'class': 'cbi-page-actions' }, [save, ' ', stop, ' ', status]),
       E('div', { 'class': 'cbi-section' }, [
         E('h3', {}, ['短信记录']),
+        E('p', {}, ['短信记录保留 7 天。']),
         E('p', {}, [refreshHistory, ' ', newerHistory, ' ', olderHistory]),
         historyNotice,
         history

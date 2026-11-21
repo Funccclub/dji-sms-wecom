@@ -6,6 +6,7 @@ import tempfile
 import types
 import unittest
 from contextlib import closing
+from datetime import datetime, timezone
 from unittest.mock import patch
 
 if sys.platform == 'win32':
@@ -16,9 +17,9 @@ spec = importlib.util.spec_from_file_location('service', pathlib.Path(__file__).
 service = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(service)
 
-def deliver(text, header=b''):
+def deliver(text, header=b'', stamp=bytes(7)):
     body = header + text.encode('utf-16-be')
-    return (bytes([0, 0x40 if header else 0, 4, 0x91, 0x21, 0x43, 0, 8]) + bytes(7) + bytes([len(body)]) + body).hex()
+    return (bytes([0, 0x40 if header else 0, 4, 0x91, 0x21, 0x43, 0, 8]) + stamp + bytes([len(body)]) + body).hex()
 
 class TestSMS(unittest.TestCase):
     def setUp(self):
@@ -60,6 +61,10 @@ class TestSMS(unittest.TestCase):
             self.assertEqual(self.db.execute("SELECT count(*) FROM sms WHERE delivery_status='sent'").fetchone()[0], 2)
 
     def test_history_pages_and_legacy_migration(self):
+        now = datetime(2026, 11, 21, 13, tzinfo=timezone.utc).timestamp()
+        clock = patch.object(service.time, 'time', return_value=now)
+        clock.start()
+        self.addCleanup(clock.stop)
         with tempfile.TemporaryDirectory() as directory:
             with patch.object(service, 'DB', str(pathlib.Path(directory) / 'state.sqlite3')):
                 self.assertEqual(service.sms_history('latest'), {'records': [], 'next_cursor': None})
@@ -96,5 +101,59 @@ class TestSMS(unittest.TestCase):
     def test_history_time_zone_and_invalid_time(self):
         self.assertEqual(service.sms_time('621112028230a0'), '2026-11-21T20:28:03-00:30')
         self.assertIsNone(service.sms_time('00000000000000'))
+
+    def test_retention_cleans_pending_and_prevents_modem_reimport(self):
+        first_read = datetime(2026, 11, 14, 12, 28, 3, tzinfo=timezone.utc).timestamp()
+        cutoff = first_read + service.RETENTION_SECONDS
+        expired = deliver('旧短信', stamp=bytes.fromhex('62114102823023'))
+        unknown_time = deliver('时间无效')
+        already_old = deliver('模块中的更旧短信', stamp=bytes.fromhex('62113102823023'))
+        recent = deliver('新短信', stamp=bytes.fromhex('62111202823023'))
+        with patch.object(service.time, 'time', return_value=first_read) as clock, \
+             patch.object(service, 'Modem') as modem, patch.object(service, 'send') as send:
+            list_sms = modem.return_value.__enter__.return_value.list_sms
+            list_sms.return_value = [expired, unknown_time]
+            service.poll(self.db, {})
+            send.assert_not_called()
+            self.assertEqual(self.db.execute('SELECT expires_at FROM sms').fetchall(), [(cutoff,), (cutoff,)])
+            with self.db:
+                self.db.execute("UPDATE sms SET done=0, delivery_status=NULL WHERE body='旧短信'")
+
+            clock.return_value = cutoff - 1
+            list_sms.side_effect = OSError('modem offline')
+            with self.assertRaises(OSError):
+                service.poll(self.db, {})
+            self.assertEqual(self.db.execute('SELECT count(*) FROM sms').fetchone()[0], 2)
+
+            clock.return_value = cutoff
+            with self.assertRaises(OSError):
+                service.poll(self.db, {})
+            self.assertEqual(self.db.execute('SELECT count(*) FROM sms').fetchone()[0], 0)
+            self.assertEqual(self.db.execute('SELECT count(*) FROM expired_sms').fetchone()[0], 2)
+
+            list_sms.side_effect = None
+            list_sms.return_value = [expired, unknown_time, already_old, recent]
+            service.poll(self.db, {})
+            service.poll(self.db, {})
+            send.assert_called_once()
+            self.assertIn('新短信', send.call_args.args[1])
+            self.assertEqual(self.db.execute('SELECT body,delivery_status FROM sms').fetchall(),
+                             [('新短信', 'sent')])
+
+    def test_legacy_expiry_uses_sms_time(self):
+        now = datetime(2026, 11, 21, 13, tzinfo=timezone.utc).timestamp()
+        with closing(sqlite3.connect(':memory:')) as db, patch.object(service.time, 'time', return_value=now):
+            with db:
+                db.execute('CREATE TABLE sms (hash TEXT PRIMARY KEY, stamp TEXT, delivery_status TEXT)')
+                db.executemany('INSERT INTO sms VALUES (?, ?, ?)', [
+                    ('old', '62113102823023', 'sent'),
+                    ('unknown', '00000000000000', 'baseline'),
+                ])
+            service.init_db(db)
+            service.init_db(db)
+            old, unknown = db.execute('SELECT expires_at,delivery_status FROM sms ORDER BY rowid').fetchall()
+            self.assertLess(old[0], now)
+            self.assertEqual(old[1], 'sent')
+            self.assertEqual(unknown, (now + service.RETENTION_SECONDS, 'baseline'))
 
 if __name__ == '__main__': unittest.main()
