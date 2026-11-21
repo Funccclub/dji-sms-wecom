@@ -32,7 +32,7 @@ jobs:
           set -euo pipefail
           exec 3>&1
           exec > build.log 2>&1
-          trap 'rc=$?; tail -n 150 "$GITHUB_WORKSPACE/build.log" >&3; exit "$rc"' EXIT
+          trap 'rc=$?; grep -in -C 4 -E "error|failed|no rule|missing" "$GITHUB_WORKSPACE/build.log" | tail -n 120 >&3 || true; tail -n 25 "$GITHUB_WORKSPACE/build.log" >&3; exit "$rc"' EXIT
           mkdir -p sdk/package/dji-sms-wecom
           cp Makefile sdk/package/dji-sms-wecom/
           cp -r files sdk/package/dji-sms-wecom/
@@ -41,7 +41,7 @@ jobs:
           ./scripts/feeds install -a -p packages
           echo 'CONFIG_PACKAGE_dji-sms-wecom=m' > .config
           make defconfig
-          make package/dji-sms-wecom/compile -j2 V=s
+          make package/dji-sms-wecom/compile -j1 V=s
           find bin/packages -name 'dji-sms-wecom_*.ipk' -print -quit | grep .
       - uses: actions/upload-artifact@v4
         with:
