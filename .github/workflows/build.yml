@@ -20,10 +20,10 @@ jobs:
           set -euo pipefail
           base=https://downloads.openwrt.org/releases/24.10.8/targets/bcm27xx/bcm2711
           curl -fsSLO "$base/sha256sums"
-          file=$(awk '{print $2}' sha256sums | grep -E '^openwrt-sdk-24\.10\.8-bcm27xx-bcm2711_.*\.Linux-x86_64\.tar\.zst$')
+          file=$(awk '{sub(/^\*/, "", $2); print $2}' sha256sums | grep -E '^openwrt-sdk-24\.10\.8-bcm27xx-bcm2711_.*\.Linux-x86_64\.tar\.zst$')
           test -n "$file"
           curl -fsSLO "$base/$file"
-          grep -F "  $file" sha256sums | sha256sum -c -
+          grep -F "$file" sha256sums | sha256sum -c -
           mkdir sdk
           tar --zstd -xf "$file" -C sdk --strip-components=1
       - name: Build package
