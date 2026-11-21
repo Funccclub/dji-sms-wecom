@@ -1,0 +1,8 @@
+{
+  "admin/services/dji-sms-wecom": {
+    "title": "大疆短信转发",
+    "order": 80,
+    "action": { "type": "view", "path": "dji-sms-wecom" },
+    "depends": { "acl": ["luci-app-dji-sms-wecom"] }
+  }
+}

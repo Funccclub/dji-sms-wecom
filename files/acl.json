@@ -1,0 +1,14 @@
+{
+  "luci-app-dji-sms-wecom": {
+    "description": "Configure DJI SMS to WeCom forwarding",
+    "read": { "file": {
+      "/etc/dji-sms-wecom.json": ["read"],
+      "/usr/libexec/dji-sms-wecom-control status": ["exec"]
+    } },
+    "write": { "file": {
+      "/etc/dji-sms-wecom.json": ["write"],
+      "/usr/libexec/dji-sms-wecom-control start": ["exec"],
+      "/usr/libexec/dji-sms-wecom-control stop": ["exec"]
+    } }
+  }
+}

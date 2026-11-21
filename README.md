@@ -1,6 +1,6 @@
 # DJI SMS → 企业微信应用
 
-面向 iStoreOS 24.10.8 / Raspberry Pi 4（`bcm27xx/bcm2711`）的 OpenWrt 软件包。通过 DJI Baiwang QDC507 的 AT 串口读取短信，解码 UCS-2 与 GSM 7-bit，合并常见的 8 位和 16 位分段短信，并通过企业微信自建应用发送文本。使用 procd 管理后台服务。
+面向 iStoreOS 24.10.8 / Raspberry Pi 4（`bcm27xx/bcm2711`）的 OpenWrt 软件包。通过 DJI Baiwang QDC507 的 AT 串口读取短信，解码 UCS-2 与 GSM 7-bit，合并常见的 8 位和 16 位分段短信，并通过企业微信自建应用发送文本。使用 procd 管理后台服务，提供 LuCI 网页配置。
 
 ## 构建
 
@@ -10,8 +10,8 @@ GitHub Actions 在 push 或手动运行时下载并校验 OpenWrt 24.10.8 SDK，
 
 1. 将构建生成的 IPK 上传到 Pi，例如 `/tmp/dji-sms-wecom.ipk`，运行 `opkg update` 和 `opkg install /tmp/dji-sms-wecom.ipk`。不要使用 `--force-depends`。
 2. 在企业微信管理后台创建自建应用，取得企业 ID、应用 Secret、AgentId 和接收成员的 UserID。应用需要有接收者的可见范围；如启用可信 IP，请确保 Pi 出口公网 IP 已加入允许列表。
-3. 用 `chmod 600 /etc/dji-sms-wecom.json` 限制文件权限，然后编辑该 JSON 文件。设置 `port`（当前设备为 `/dev/ttyUSB2`）、`corp_id`、`corp_secret`、`agent_id`、`to_user`（接收人的 UserID），可设置 `poll_seconds`。使用 JSON 字符串；只在明确希望所有应用可见成员收到短信时才使用 `@all`。不要把密钥或填好的配置提交到 GitHub。
-4. 运行 `/etc/init.d/dji-sms-wecom enable` 和 `/etc/init.d/dji-sms-wecom start`。使用 `logread | grep dji-sms-wecom` 查看状态，然后从其他手机发送一条测试短信，确认企业微信收到。
+3. 刷新浏览器并重新登录 LuCI，在 **服务 → 大疆短信转发** 输入配置并点击“保存并启动”。也可以直接编辑 `/etc/dji-sms-wecom.json`：设置 `port`（当前设备为 `/dev/ttyUSB2`）、`corp_id`、`corp_secret`、`agent_id`、`to_user`（接收人的 UserID）和 `poll_seconds`。使用 JSON 字符串；只在明确希望所有应用可见成员收到短信时才使用 `@all`。不要把密钥或填好的配置提交到 GitHub。
+4. 使用页面的“查看状态”或 `logread | grep dji-sms-wecom` 查看状态，然后从其他手机发送一条测试短信，确认企业微信收到。
 
 第一次成功扫描时，已有短信会作为基线，不会转发；后续新短信才会进入待发送队列。读取短信可能把未读状态改为已读。本工具不会删除短信，模块存储可能因此满载，需要自行管理。
 

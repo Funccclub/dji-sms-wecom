@@ -1,0 +1,8 @@
+#!/bin/sh
+[ "$#" -eq 1 ] || exit 2
+case "$1" in
+  start) /etc/init.d/dji-sms-wecom enable && /etc/init.d/dji-sms-wecom restart ;;
+  stop) /etc/init.d/dji-sms-wecom disable && /etc/init.d/dji-sms-wecom stop ;;
+  status) /etc/init.d/dji-sms-wecom status ;;
+  *) exit 2 ;;
+esac
