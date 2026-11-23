@@ -142,8 +142,10 @@ return view.extend({
     loadHistory(historyPages);
 
     var recipient = E('input', { 'class': 'cbi-input-text', 'type': 'tel',
+      'id': 'sms-recipient', 'style': 'width: 100%; max-width: 42rem; box-sizing: border-box',
       'placeholder': '手机号码，国际号码以 + 开头' });
-    var smsContent = E('textarea', { 'class': 'cbi-input-text', 'rows': 4,
+    var smsContent = E('textarea', { 'class': 'cbi-input-text', 'rows': 6,
+      'id': 'sms-content', 'style': 'width: 100%; max-width: 42rem; min-height: 9rem; box-sizing: border-box; resize: vertical',
       'placeholder': '短信内容' });
     var smsResult = E('p', { 'role': 'status' });
     var sendSms = E('button', { 'class': 'btn cbi-button cbi-button-action', 'type': 'button',
@@ -262,10 +264,18 @@ return view.extend({
     ]);
     var sendPanel = E('div', { 'class': 'cbi-section', 'id': 'sms-outgoing', 'role': 'tabpanel' }, [
         E('h3', {}, ['发送短信']),
-        E('p', {}, [E('label', {}, ['接收号码 ', recipient])]),
-        E('p', {}, [E('label', {}, ['短信内容 ', smsContent])]),
-        E('p', {}, [sendSms]),
-        smsResult,
+        E('div', { 'class': 'cbi-value' }, [
+          E('label', { 'class': 'cbi-value-title', 'for': 'sms-recipient' }, ['接收号码']),
+          E('div', { 'class': 'cbi-value-field' }, [recipient])
+        ]),
+        E('div', { 'class': 'cbi-value' }, [
+          E('label', { 'class': 'cbi-value-title', 'for': 'sms-content' }, ['短信内容']),
+          E('div', { 'class': 'cbi-value-field' }, [smsContent])
+        ]),
+        E('div', { 'class': 'cbi-value' }, [
+          E('div', { 'class': 'cbi-value-title' }),
+          E('div', { 'class': 'cbi-value-field' }, [sendSms, smsResult])
+        ]),
         E('h3', {}, ['发送记录']),
         E('p', {}, ['记录保留 7 天。']),
         E('p', {}, [refreshOutgoing, ' ', newerOutgoing, ' ', olderOutgoing]),
