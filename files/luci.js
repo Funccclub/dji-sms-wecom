@@ -169,6 +169,7 @@ return view.extend({
               smsResult.textContent = state.message || (state.status === 'sent' ? '模块已接受短信。' : '发送失败。');
               sendSms.disabled = false;
               if (state.status === 'sent') smsContent.value = '';
+              loadOutgoing([null]);
             } else if (Date.now() < deadline) {
               smsResult.textContent = '正在等待模块处理…';
               setTimeout(check, 2000);
@@ -193,10 +194,63 @@ return view.extend({
       }
     }, ['发送短信']);
 
-    return E('div', { 'class': 'cbi-map' }, [
-      E('h2', {}, ['大疆短信转发']),
-      E('p', {}, ['通过大疆 4G 模块读取新短信并发送到企业微信自建应用。首次启动会跳过现有短信；不会自动删除短信。']),
-      E('div', { 'class': 'cbi-section' }, [
+    var outgoing = E('div', { 'style': 'overflow-x: auto' });
+    var outgoingNotice = E('p', { 'role': 'status' });
+    var outgoingPages = [null];
+    var outgoingNext = null;
+    var outgoingPending = false;
+    var outgoingLabels = { queued: '等待发送', sending: '发送中', sent: '模块已接受', failed: '发送失败' };
+    var refreshOutgoing = historyButton('刷新发送记录', function() { loadOutgoing([null]); });
+    var newerOutgoing = historyButton('较新发送记录', function() {
+      if (outgoingPages.length > 1) loadOutgoing(outgoingPages.slice(0, -1));
+    });
+    var olderOutgoing = historyButton('较早发送记录', function() {
+      if (outgoingNext) loadOutgoing(outgoingPages.concat(outgoingNext));
+    });
+    function updateOutgoingButtons() {
+      refreshOutgoing.disabled = outgoingPending;
+      newerOutgoing.disabled = outgoingPending || outgoingPages.length === 1;
+      olderOutgoing.disabled = outgoingPending || !outgoingNext;
+    }
+    function loadOutgoing(pages) {
+      if (outgoingPending) return;
+      outgoingPending = true;
+      updateOutgoingButtons();
+      outgoingNotice.textContent = '正在读取发送记录…';
+      return fs.exec(controlPath, ['outgoing-history', pages[pages.length - 1] || 'latest']).then(function(res) {
+        if (res.code !== 0) throw new Error();
+        var page = JSON.parse(res.stdout);
+        var headings = ['发送时间', '接收号码', '短信内容', '发送状态'].map(function(label) {
+          return E('th', { 'scope': 'col' }, [label]);
+        });
+        var rows = page.records.map(function(record) {
+          var time = record.time ? record.time.slice(0, 19).replace('T', ' ') : '—';
+          var statusText = outgoingLabels[record.status] || '状态未知';
+          if (record.status === 'failed' && record.message) statusText += '：' + record.message;
+          return E('tr', {}, [
+            E('td', {}, [time]), E('td', {}, [record.number]),
+            E('td', { 'style': 'white-space: pre-wrap; overflow-wrap: anywhere' }, [record.body]),
+            E('td', {}, [statusText])
+          ]);
+        });
+        outgoing.replaceChildren(E('table', { 'class': 'table' }, [
+          E('thead', {}, [E('tr', {}, headings)]), E('tbody', {}, rows)
+        ]));
+        outgoingNotice.textContent = rows.length ? '' : '暂无发送记录。';
+        outgoingPages = pages;
+        outgoingNext = page.next_cursor;
+      }).catch(function() {
+        outgoingNotice.textContent = '无法读取发送记录。请刷新后重试。';
+      }).finally(function() {
+        outgoingPending = false;
+        updateOutgoingButtons();
+      });
+    }
+
+    var settingsPanel = E('div', { 'class': 'cbi-section', 'id': 'sms-settings', 'role': 'tabpanel' }, [
+      E('h3', {}, ['转发设置']),
+      E('p', {}, ['首次启动时，已有短信作为基线，后续新短信会转发到企业微信。']),
+      E('div', {}, [
         field('port', 'AT 串口', 'text', '/dev/ttyUSB2', '大疆模块的 AT 串口。'),
         field('poll_seconds', '轮询间隔（秒）', 'number', '30', '最短 10 秒。'),
         field('corp_id', '企业 ID', 'text', '', '企业微信管理后台的企业 ID。'),
@@ -204,21 +258,50 @@ return view.extend({
         field('agent_id', '应用 AgentId', 'text', '', '自建应用的数字 AgentId。'),
         field('to_user', '接收成员 UserID', 'text', '', '多个成员用 | 分隔；@all 会发送给应用可见范围内的所有成员。')
       ]),
-      E('div', { 'class': 'cbi-page-actions' }, [save, ' ', stop, ' ', status]),
-      E('div', { 'class': 'cbi-section' }, [
+      E('div', { 'class': 'cbi-page-actions' }, [save, ' ', stop, ' ', status])
+    ]);
+    var sendPanel = E('div', { 'class': 'cbi-section', 'id': 'sms-outgoing', 'role': 'tabpanel' }, [
         E('h3', {}, ['发送短信']),
         E('p', {}, [E('label', {}, ['接收号码 ', recipient])]),
         E('p', {}, [E('label', {}, ['短信内容 ', smsContent])]),
         E('p', {}, [sendSms]),
-        smsResult
-      ]),
-      E('div', { 'class': 'cbi-section' }, [
-        E('h3', {}, ['短信记录']),
+        smsResult,
+        E('h3', {}, ['发送记录']),
+        E('p', {}, ['记录保留 7 天。']),
+        E('p', {}, [refreshOutgoing, ' ', newerOutgoing, ' ', olderOutgoing]),
+        outgoingNotice, outgoing
+    ]);
+    var receivePanel = E('div', { 'class': 'cbi-section', 'id': 'sms-incoming', 'role': 'tabpanel' }, [
+        E('h3', {}, ['接收记录']),
         E('p', {}, ['短信记录保留 7 天。']),
         E('p', {}, [refreshHistory, ' ', newerHistory, ' ', olderHistory]),
         historyNotice,
         history
-      ])
+    ]);
+    var panels = [receivePanel, sendPanel, settingsPanel];
+    var tabs = [];
+    var tabItems = [];
+    function selectTab(index) {
+      panels.forEach(function(panel, i) {
+        panel.hidden = i !== index;
+        tabItems[i].className = i === index ? 'tab' : 'tab-disabled';
+        tabs[i].setAttribute('aria-selected', i === index ? 'true' : 'false');
+      });
+      if (index === 1) loadOutgoing([null]);
+    }
+    ['接收短信', '发送短信', '转发设置'].forEach(function(label, index) {
+      var link = E('a', { 'href': '#', 'role': 'tab',
+        'aria-controls': ['sms-incoming', 'sms-outgoing', 'sms-settings'][index],
+        'click': function(event) { event.preventDefault(); selectTab(index); }
+      }, [label]);
+      tabs.push(link);
+      tabItems.push(E('li', {}, [link]));
+    });
+    selectTab(0);
+    return E('div', { 'class': 'cbi-map' }, [
+      E('h2', {}, ['大疆短信']),
+      E('ul', { 'class': 'cbi-tabmenu', 'role': 'tablist', 'aria-label': '短信功能' }, tabItems),
+      receivePanel, sendPanel, settingsPanel
     ]);
   },
   handleSave: null,

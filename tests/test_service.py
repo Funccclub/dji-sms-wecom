@@ -118,12 +118,21 @@ class TestSMS(unittest.TestCase):
     def test_duplicate_submission_and_input_validation(self):
         with tempfile.TemporaryDirectory() as directory, \
              patch.object(service, 'OUTBOX', directory), \
+             patch.object(service, 'DB', str(pathlib.Path(directory) / 'state.sqlite3')), \
              patch.object(service.subprocess, 'Popen') as launch:
             job = 'a' * 32
             service.submit_job(job, '12345', '5rWL6K+V')
             service.submit_job(job, '12345', '5rWL6K+V')
             launch.assert_called_once()
             self.assertEqual(service.job_status(job), {'status': 'queued', 'message': ''})
+            service.update_job(str(pathlib.Path(directory) / job), 'sent', '模块已接受短信')
+            records = service.outgoing_history('latest')['records']
+            self.assertEqual([(r['number'], r['body'], r['status']) for r in records],
+                             [('12345', '测试', 'sent')])
+            pathlib.Path(directory, job).unlink()
+            self.assertEqual(service.job_status(job)['status'], 'sent')
+            service.submit_job(job, '12345', '5rWL6K+V')
+            launch.assert_called_once()
             with self.assertRaises(ValueError):
                 service.submit_job('b' * 32, '12;AT', '5rWL6K+V')
 

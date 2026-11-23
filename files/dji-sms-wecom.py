@@ -175,6 +175,8 @@ def poll(db, cfg):
     with db:
         db.execute('INSERT OR IGNORE INTO expired_sms (hash) SELECT hash FROM sms WHERE expires_at <= ?', (now,))
         removed = db.execute('DELETE FROM sms WHERE expires_at <= ?', (now,)).rowcount
+        db.execute("DELETE FROM outgoing_sms WHERE created_at <= ? AND status IN ('sent','failed')",
+                   (now - RETENTION_SECONDS,))
     if removed:
         print('Expired SMS records removed: %d' % removed, flush=True)
 
@@ -241,6 +243,8 @@ def init_db(db):
         db.execute('CREATE INDEX IF NOT EXISTS sms_expiry_index ON sms(expires_at)')
         # The modem may keep returning expired records. Keep only the deduplication hashes.
         db.execute('CREATE TABLE IF NOT EXISTS expired_sms (hash TEXT PRIMARY KEY) WITHOUT ROWID')
+        db.execute('CREATE TABLE IF NOT EXISTS outgoing_sms (job TEXT PRIMARY KEY, number TEXT NOT NULL, '
+                   'body TEXT NOT NULL, created_at INTEGER NOT NULL, status TEXT NOT NULL, message TEXT NOT NULL)')
 
 
 def parse_sms_time(stamp):
@@ -317,9 +321,17 @@ def submit_job(job, number, payload):
     content = base64.b64decode(payload, validate=True).decode('utf-8')
     if not content.strip() or len(content.encode('utf-16-be')) > 140:
         raise ValueError('短信内容须为 1 至 70 个中文字或等量字符')
+    with closing(sqlite3.connect(DB)) as db:
+        init_db(db)
+        with db:
+            added = db.execute('INSERT OR IGNORE INTO outgoing_sms VALUES (?, ?, ?, ?, ?, ?)',
+                               (job, number, content, int(time.time()), 'queued', '')).rowcount
+        if not added:
+            return
     try:
         fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
     except FileExistsError:
+        update_job(path, 'failed', '请求已存在，发送结果未知')
         return
     with os.fdopen(fd, 'w', encoding='utf-8') as f:
         json.dump({'status': 'queued', 'number': number, 'content': content}, f)
@@ -329,10 +341,15 @@ def submit_job(job, number, payload):
                          start_new_session=True, close_fds=True)
     except Exception:
         os.unlink(path)
+        with closing(sqlite3.connect(DB)) as db, db:
+            db.execute("UPDATE outgoing_sms SET status='failed', message=? WHERE job=?", ('无法启动发送任务', job))
         raise
 
 
 def update_job(path, status, message=''):
+    with closing(sqlite3.connect(DB)) as db, db:
+        db.execute('UPDATE outgoing_sms SET status=?, message=? WHERE job=?',
+                   (status, message, os.path.basename(path)))
     temporary = path + '.new'
     with open(temporary, 'w', encoding='utf-8') as f:
         json.dump({'status': status, 'message': message}, f)
@@ -357,9 +374,34 @@ def send_worker(job):
 
 def job_status(job):
     path = outbox_path(job)
+    with closing(sqlite3.connect(DB)) as db:
+        row = db.execute('SELECT status,message FROM outgoing_sms WHERE job=?', (job,)).fetchone()
+    if row:
+        return {'status': row[0], 'message': row[1]}
     with open(path, encoding='utf-8') as f:
         request = json.load(f)
     return {'status': request['status'], 'message': request.get('message', '')}
+
+
+def outgoing_history(cursor):
+    if cursor != 'latest' and (not re.fullmatch(r'[1-9][0-9]{0,18}', cursor) or int(cursor) > MAX_ROW_ID):
+        raise ValueError('Invalid history cursor')
+    upper_id = MAX_ROW_ID if cursor == 'latest' else int(cursor) - 1
+    if not os.path.exists(DB):
+        return {'records': [], 'next_cursor': None}
+    with closing(sqlite3.connect('file:' + DB + '?mode=ro', uri=True)) as db:
+        if not db.execute("SELECT 1 FROM sqlite_master WHERE type='table' AND name='outgoing_sms'").fetchone():
+            return {'records': [], 'next_cursor': None}
+        rows = db.execute(
+            'SELECT rowid,number,body,created_at,status,message FROM outgoing_sms '
+            'WHERE rowid <= ? AND (created_at > ? OR status NOT IN (?, ?)) ORDER BY rowid DESC LIMIT ?',
+            (upper_id, int(time.time()) - RETENTION_SECONDS, 'sent', 'failed', HISTORY_PAGE_SIZE + 1),
+        ).fetchall()
+    return {'records': [
+        {'number': number, 'body': body, 'time': datetime.fromtimestamp(created).astimezone().isoformat(),
+         'status': status, 'message': message}
+        for _, number, body, created, status, message in rows[:HISTORY_PAGE_SIZE]
+    ], 'next_cursor': str(rows[HISTORY_PAGE_SIZE - 1][0]) if len(rows) > HISTORY_PAGE_SIZE else None}
 
 
 def main():
@@ -389,6 +431,12 @@ if __name__ == '__main__':
         try:
             print(json.dumps(job_status(sys.argv[2])))
         except (ValueError, OSError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
+    elif len(sys.argv) == 3 and sys.argv[1] == 'outgoing-history':
+        try:
+            print(json.dumps(outgoing_history(sys.argv[2])))
+        except (ValueError, sqlite3.Error) as error:
             print(str(error), file=sys.stderr)
             sys.exit(1)
     elif len(sys.argv) == 3 and sys.argv[1] == 'history':

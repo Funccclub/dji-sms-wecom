@@ -5,8 +5,8 @@ fi
 if [ "$#" -eq 2 ] && [ "$1" = send-status ]; then
   exec /usr/sbin/dji-sms-wecom "$@"
 fi
-if [ "$#" -eq 2 ] && [ "$1" = history ]; then
-  exec /usr/sbin/dji-sms-wecom history "$2"
+if [ "$#" -eq 2 ] && { [ "$1" = history ] || [ "$1" = outgoing-history ]; }; then
+  exec /usr/sbin/dji-sms-wecom "$@"
 fi
 [ "$#" -eq 1 ] || exit 2
 case "$1" in

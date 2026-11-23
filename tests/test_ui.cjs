@@ -20,6 +20,11 @@ const fs = {
     commands.push([p, args]);
     if (args[0] === 'history')
       return Promise.resolve(historyError ? {code:1} : {code:0,stdout:JSON.stringify(pages[args[1]])});
+    if (args[0] === 'outgoing-history')
+      return Promise.resolve({code:0,stdout:JSON.stringify({
+        records: [{number:'12345',body:'测试发送',time:'2026-11-24T00:00:00+08:00',status:'sent'}],
+        next_cursor:null
+      })});
     return Promise.resolve({code:0,stdout:'running'});
   }
 };
@@ -29,7 +34,8 @@ function E(tag, attrs, children) {
   if (Array.isArray(attrs)) { children=attrs; attrs={}; }
   return {
     tag, attrs:attrs || {}, children:children || [], value:attrs && attrs.value || '',
-    replaceChildren(...children) { this.children = children; }
+    replaceChildren(...children) { this.children = children; },
+    setAttribute(name, value) { this.attrs[name] = value; }
   };
 }
 const source = fsnode.readFileSync('files/luci.js','utf8');
@@ -52,10 +58,21 @@ async function test() {
   assert.ok(flatten(root).some(x => x.children.includes('第 1/2 段')));
   assert.ok(button('较新记录').disabled);
   assert.ok(!button('较早记录').disabled);
+  const panels = elements.filter(x => x.attrs.role === 'tabpanel');
+  const tabs = elements.filter(x => x.attrs.role === 'tab');
+  assert.equal(panels[0].hidden, false);
+  assert.equal(panels[1].hidden, true);
+  tabs[1].attrs.click({preventDefault() {}});
+  await settle();
+  assert.equal(panels[0].hidden, true);
+  assert.equal(panels[1].hidden, false);
+  assert.equal(tabs[1].attrs['aria-selected'], 'true');
+  assert.ok(cells().includes('测试发送'));
+  assert.ok(cells().includes('模块已接受'));
 
   button('较早记录').attrs.click();
   await settle();
-  assert.equal(commands[1][1].join(' '), 'history 25');
+  assert.equal(commands.at(-1)[1].join(' '), 'history 25');
   assert.ok(cells().includes('历史状态未知'));
   assert.ok(button('较早记录').disabled);
   button('较新记录').attrs.click();

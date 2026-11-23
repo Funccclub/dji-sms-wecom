@@ -6,7 +6,8 @@
       "file": {
         "/etc/dji-sms-wecom.json": ["read"],
         "/usr/libexec/dji-sms-wecom-control status": ["exec"],
-        "/usr/libexec/dji-sms-wecom-control history *": ["exec"]
+        "/usr/libexec/dji-sms-wecom-control history *": ["exec"],
+        "/usr/libexec/dji-sms-wecom-control outgoing-history *": ["exec"]
       }
     },
     "write": {
