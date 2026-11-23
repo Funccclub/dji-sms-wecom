@@ -2,12 +2,15 @@
 """Poll a QDC507 AT port and forward newly observed SMS to WeCom."""
 from contextlib import closing
 from datetime import datetime, timedelta, timezone
+import base64
+import fcntl
 import hashlib
 import json
 import os
 import re
 import select
 import sqlite3
+import subprocess
 import sys
 import termios
 import time
@@ -20,6 +23,7 @@ DB = '/etc/dji-sms-wecom-state.sqlite3'
 RETENTION_SECONDS = 7 * 24 * 60 * 60
 HISTORY_PAGE_SIZE = 25
 MAX_ROW_ID = 2**63 - 1
+OUTBOX = '/tmp/dji-sms-wecom-outbox'
 GSM = '@£$¥èéùìòÇ\nØø\rÅåΔ_ΦΓΛΩΠΨΣΘΞ\x1bÆæßÉ !"#¤%&\'()*+,-./0123456789:;<=>?¡ABCDEFGHIJKLMNOPQRSTUVWXYZÄÖÑÜ§¿abcdefghijklmnopqrstuvwxyzäöñüà'
 EXT = {10:'\f', 20:'^', 40:'{', 41:'}', 47:'\\', 60:'[', 61:'~', 62:']', 64:'|', 101:'€'}
 
@@ -77,14 +81,28 @@ def decode_pdu(hextext):
 
 class Modem:
     def __enter__(self):
-        self.fd = os.open(cfg['port'], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
-        self.old = termios.tcgetattr(self.fd)
-        tty.setraw(self.fd)
-        a = termios.tcgetattr(self.fd); a[4] = a[5] = termios.B115200
-        termios.tcsetattr(self.fd, termios.TCSANOW, a)
+        self.lock = open('/var/lock/dji-sms-wecom.lock', 'a')
+        fcntl.flock(self.lock, fcntl.LOCK_EX)
+        try:
+            self.fd = os.open(cfg['port'], os.O_RDWR | os.O_NOCTTY | os.O_NONBLOCK)
+            try:
+                self.old = termios.tcgetattr(self.fd)
+                tty.setraw(self.fd)
+                a = termios.tcgetattr(self.fd); a[4] = a[5] = termios.B115200
+                termios.tcsetattr(self.fd, termios.TCSANOW, a)
+            except Exception:
+                os.close(self.fd)
+                raise
+        except Exception:
+            self.lock.close()
+            raise
         return self
     def __exit__(self, *args):
-        termios.tcsetattr(self.fd, termios.TCSANOW, self.old); os.close(self.fd)
+        try:
+            termios.tcsetattr(self.fd, termios.TCSANOW, self.old)
+        finally:
+            os.close(self.fd)
+            self.lock.close()
     def at(self, command):
         termios.tcflush(self.fd, termios.TCIFLUSH)
         os.write(self.fd, (command+'\r').encode())
@@ -107,6 +125,39 @@ class Modem:
         finally:
             if old: self.at('AT+CMGF=1')
         return re.findall(r'\+CMGL:\s*\d+,[^\r\n]*\r?\n([0-9A-Fa-f]+)', result)
+
+    def submit_sms(self, number, content):
+        encoded = content.encode('utf-16-be')
+        digits_only = number.lstrip('+')
+        swapped = ''.join((digits_only + ('F' if len(digits_only) % 2 else ''))[i:i+2][::-1]
+                          for i in range(0, len(digits_only), 2))
+        tpdu = bytes.fromhex('1100') + bytes([len(digits_only), 0x91 if number.startswith('+') else 0x81])
+        tpdu += bytes.fromhex(swapped) + bytes.fromhex('0008AA') + bytes([len(encoded)]) + encoded
+        self.at('AT')
+        self.at('AT+CMGF=0')
+        termios.tcflush(self.fd, termios.TCIFLUSH)
+        os.write(self.fd, ('AT+CMGS=%d\r' % len(tpdu)).encode())
+        self.read_until((b'> ',), 20)
+        os.write(self.fd, b'00' + tpdu.hex().upper().encode() + b'\x1a')
+        try:
+            result = self.read_until((b'\r\nOK\r\n',), 120)
+        except TimeoutError:
+            raise RuntimeError('提交后等待模块响应超时，发送结果未知，请先确认收件情况')
+        if not re.search(rb'\+CMGS:\s*\d+', result):
+            raise RuntimeError('模块响应不完整，发送结果未知，请先确认收件情况')
+
+    def read_until(self, endings, timeout):
+        data = b''
+        deadline = time.monotonic() + timeout
+        while time.monotonic() < deadline:
+            ready, _, _ = select.select([self.fd], [], [], max(0, deadline - time.monotonic()))
+            if ready:
+                data += os.read(self.fd, 4096)
+                if any(end in data for end in endings):
+                    return data
+                if b'\r\nERROR\r\n' in data or b'+CMS ERROR:' in data or b'+CME ERROR:' in data:
+                    raise RuntimeError('模块拒绝发送短信')
+        raise TimeoutError('模块响应超时')
 
 def send(cfg, content):
     params = urllib.parse.urlencode({'corpid':cfg['corp_id'], 'corpsecret':cfg['corp_secret']})
@@ -252,6 +303,65 @@ def sms_history(cursor):
     return page
 
 
+def outbox_path(job):
+    if not re.fullmatch(r'[0-9a-f]{32}', job):
+        raise ValueError('Invalid request')
+    os.makedirs(OUTBOX, mode=0o700, exist_ok=True)
+    return os.path.join(OUTBOX, job)
+
+
+def submit_job(job, number, payload):
+    path = outbox_path(job)
+    if not re.fullmatch(r'\+?[0-9]{1,20}', number):
+        raise ValueError('手机号格式不正确')
+    content = base64.b64decode(payload, validate=True).decode('utf-8')
+    if not content.strip() or len(content.encode('utf-16-be')) > 140:
+        raise ValueError('短信内容须为 1 至 70 个中文字或等量字符')
+    try:
+        fd = os.open(path, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+    except FileExistsError:
+        return
+    with os.fdopen(fd, 'w', encoding='utf-8') as f:
+        json.dump({'status': 'queued', 'number': number, 'content': content}, f)
+    try:
+        subprocess.Popen([sys.executable, os.path.abspath(__file__), 'send-worker', job],
+                         stdin=subprocess.DEVNULL, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
+                         start_new_session=True, close_fds=True)
+    except Exception:
+        os.unlink(path)
+        raise
+
+
+def update_job(path, status, message=''):
+    temporary = path + '.new'
+    with open(temporary, 'w', encoding='utf-8') as f:
+        json.dump({'status': status, 'message': message}, f)
+    os.replace(temporary, path)
+
+
+def send_worker(job):
+    global cfg
+    path = outbox_path(job)
+    try:
+        with open(path, encoding='utf-8') as f:
+            request = json.load(f)
+        with open(CONFIG, encoding='utf-8') as f:
+            cfg = json.load(f)
+        update_job(path, 'sending')
+        with Modem() as modem:
+            modem.submit_sms(request['number'], request['content'])
+        update_job(path, 'sent', '模块已接受短信')
+    except Exception as error:
+        update_job(path, 'failed', str(error))
+
+
+def job_status(job):
+    path = outbox_path(job)
+    with open(path, encoding='utf-8') as f:
+        request = json.load(f)
+    return {'status': request['status'], 'message': request.get('message', '')}
+
+
 def main():
     global cfg
     os.umask(0o077)
@@ -266,7 +376,22 @@ def main():
         time.sleep(max(10, int(cfg.get('poll_seconds',30))))
 
 if __name__ == '__main__':
-    if len(sys.argv) == 3 and sys.argv[1] == 'history':
+    if len(sys.argv) == 5 and sys.argv[1] == 'submit-sms':
+        try:
+            submit_job(*sys.argv[2:])
+            print(json.dumps({'status': 'queued'}))
+        except (ValueError, UnicodeError, OSError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
+    elif len(sys.argv) == 3 and sys.argv[1] == 'send-worker':
+        send_worker(sys.argv[2])
+    elif len(sys.argv) == 3 and sys.argv[1] == 'send-status':
+        try:
+            print(json.dumps(job_status(sys.argv[2])))
+        except (ValueError, OSError) as error:
+            print(str(error), file=sys.stderr)
+            sys.exit(1)
+    elif len(sys.argv) == 3 and sys.argv[1] == 'history':
         try:
             print(json.dumps(sms_history(sys.argv[2])))
         except (ValueError, sqlite3.Error) as error:

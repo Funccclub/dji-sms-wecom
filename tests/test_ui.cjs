@@ -65,7 +65,7 @@ async function test() {
   historyError = true;
   button('刷新记录').attrs.click();
   await settle();
-  assert.match(elements.find(x => x.attrs.role === 'status').textContent, /无法读取/);
+  assert.ok(elements.some(x => x.attrs.role === 'status' && /无法读取/.test(x.textContent || '')));
   assert.ok(cells().includes('已推送'));
 
   assert.equal(elements.find(x => x.tag === 'input' && x.attrs.type === 'password').value, 'secret');

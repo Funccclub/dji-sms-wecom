@@ -14,7 +14,9 @@
       "file": {
         "/etc/dji-sms-wecom.json": ["write"],
         "/usr/libexec/dji-sms-wecom-control start": ["exec"],
-        "/usr/libexec/dji-sms-wecom-control stop": ["exec"]
+        "/usr/libexec/dji-sms-wecom-control stop": ["exec"],
+        "/usr/libexec/dji-sms-wecom-control submit-sms *": ["exec"],
+        "/usr/libexec/dji-sms-wecom-control send-status *": ["exec"]
       }
     }
   }

@@ -12,6 +12,7 @@ from unittest.mock import patch
 if sys.platform == 'win32':
     sys.modules.setdefault('termios', types.ModuleType('termios'))
     sys.modules.setdefault('tty', types.ModuleType('tty'))
+    sys.modules.setdefault('fcntl', types.ModuleType('fcntl'))
 
 spec = importlib.util.spec_from_file_location('service', pathlib.Path(__file__).parents[1] / 'files' / 'dji-sms-wecom.py')
 service = importlib.util.module_from_spec(spec)
@@ -101,6 +102,30 @@ class TestSMS(unittest.TestCase):
     def test_history_time_zone_and_invalid_time(self):
         self.assertEqual(service.sms_time('621112028230a0'), '2026-11-21T20:28:03-00:30')
         self.assertIsNone(service.sms_time('00000000000000'))
+
+    def test_outgoing_pdu_and_confirmation(self):
+        modem = service.Modem()
+        modem.fd = 12
+        replies = [b'> ', b'\r\n+CMGS: 42\r\n\r\nOK\r\n']
+        with patch.object(modem, 'at'), patch.object(modem, 'read_until', side_effect=replies), \
+             patch.object(service.termios, 'tcflush', create=True), \
+             patch.object(service.termios, 'TCIFLUSH', 0, create=True), \
+             patch.object(service.os, 'write') as write:
+            modem.submit_sms('+12345', '测试')
+        self.assertEqual(write.call_args_list[0].args[1], b'AT+CMGS=15\r')
+        self.assertEqual(write.call_args_list[1].args[1], b'00110005912143F50008AA046D4B8BD5\x1a')
+
+    def test_duplicate_submission_and_input_validation(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(service, 'OUTBOX', directory), \
+             patch.object(service.subprocess, 'Popen') as launch:
+            job = 'a' * 32
+            service.submit_job(job, '12345', '5rWL6K+V')
+            service.submit_job(job, '12345', '5rWL6K+V')
+            launch.assert_called_once()
+            self.assertEqual(service.job_status(job), {'status': 'queued', 'message': ''})
+            with self.assertRaises(ValueError):
+                service.submit_job('b' * 32, '12;AT', '5rWL6K+V')
 
     def test_retention_cleans_pending_and_prevents_modem_reimport(self):
         first_read = datetime(2026, 11, 14, 12, 28, 3, tzinfo=timezone.utc).timestamp()

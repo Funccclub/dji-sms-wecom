@@ -141,6 +141,58 @@ return view.extend({
     }
     loadHistory(historyPages);
 
+    var recipient = E('input', { 'class': 'cbi-input-text', 'type': 'tel',
+      'placeholder': '手机号码，国际号码以 + 开头' });
+    var smsContent = E('textarea', { 'class': 'cbi-input-text', 'rows': 4,
+      'placeholder': '短信内容' });
+    var smsResult = E('p', { 'role': 'status' });
+    var sendSms = E('button', { 'class': 'btn cbi-button cbi-button-action', 'type': 'button',
+      'click': function() {
+        var number = recipient.value.trim();
+        var content = smsContent.value;
+        if (!/^\+?\d{1,20}$/.test(number) || !content.trim() || content.length > 70) {
+          smsResult.textContent = '请输入有效号码和短信内容，内容最多 70 个字符。';
+          return;
+        }
+        var bytes = new Uint8Array(16);
+        crypto.getRandomValues(bytes);
+        var job = Array.from(bytes, function(b) { return b.toString(16).padStart(2, '0'); }).join('');
+        var encoded = btoa(unescape(encodeURIComponent(content)));
+        var deadline = Date.now() + 180000;
+        sendSms.disabled = true;
+        smsResult.textContent = '正在提交短信…';
+        function check() {
+          fs.exec(controlPath, ['send-status', job]).then(function(res) {
+            if (res.code !== 0) throw new Error();
+            var state = JSON.parse(res.stdout);
+            if (state.status === 'sent' || state.status === 'failed') {
+              smsResult.textContent = state.message || (state.status === 'sent' ? '模块已接受短信。' : '发送失败。');
+              sendSms.disabled = false;
+              if (state.status === 'sent') smsContent.value = '';
+            } else if (Date.now() < deadline) {
+              smsResult.textContent = '正在等待模块处理…';
+              setTimeout(check, 2000);
+            } else {
+              smsResult.textContent = '等待超时，发送结果未知，请先确认收件情况。';
+              sendSms.disabled = false;
+            }
+          }).catch(function() {
+            if (Date.now() < deadline) setTimeout(check, 2000);
+            else {
+              smsResult.textContent = '无法查询发送结果，请先确认收件情况。';
+              sendSms.disabled = false;
+            }
+          });
+        }
+        fs.exec(controlPath, ['submit-sms', job, number, encoded]).then(function(res) {
+          if (res.code !== 0) {
+            smsResult.textContent = res.stderr || '提交失败。';
+            sendSms.disabled = false;
+          } else check();
+        }).catch(function() { check(); });
+      }
+    }, ['发送短信']);
+
     return E('div', { 'class': 'cbi-map' }, [
       E('h2', {}, ['大疆短信转发']),
       E('p', {}, ['通过大疆 4G 模块读取新短信并发送到企业微信自建应用。首次启动会跳过现有短信；不会自动删除短信。']),
@@ -153,6 +205,13 @@ return view.extend({
         field('to_user', '接收成员 UserID', 'text', '', '多个成员用 | 分隔；@all 会发送给应用可见范围内的所有成员。')
       ]),
       E('div', { 'class': 'cbi-page-actions' }, [save, ' ', stop, ' ', status]),
+      E('div', { 'class': 'cbi-section' }, [
+        E('h3', {}, ['发送短信']),
+        E('p', {}, [E('label', {}, ['接收号码 ', recipient])]),
+        E('p', {}, [E('label', {}, ['短信内容 ', smsContent])]),
+        E('p', {}, [sendSms]),
+        smsResult
+      ]),
       E('div', { 'class': 'cbi-section' }, [
         E('h3', {}, ['短信记录']),
         E('p', {}, ['短信记录保留 7 天。']),
