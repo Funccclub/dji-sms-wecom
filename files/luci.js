@@ -75,7 +75,8 @@ return view.extend({
       pending: '未推送',
       sent: '已推送',
       baseline: '首次读取未推送',
-      unknown: '历史状态未知'
+      unknown: '历史状态未知',
+      mixed: '各段推送状态不同'
     };
     function historyButton(label, onClick) {
       return E('button', { 'class': 'btn cbi-button', 'type': 'button', 'click': onClick }, [label]);
@@ -104,9 +105,9 @@ return view.extend({
       var rows = records.map(function(record) {
         var time = record.time ? record.time.slice(0, 19).replace('T', ' ') + ' ' + record.time.slice(19) : '—';
         var content = [record.body];
-        if (record.total > 1) {
+        if (record.total > 1 && record.received_parts != null && record.received_parts < record.total) {
           content.push(E('div', { 'class': 'cbi-value-description' },
-            ['第 ' + record.part + '/' + record.total + ' 段']));
+            ['已收到 ' + record.received_parts + '/' + record.total + ' 段']));
         }
         return E('tr', {}, [
           E('td', {}, [time]),

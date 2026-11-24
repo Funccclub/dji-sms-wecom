@@ -290,20 +290,54 @@ def sms_history(cursor):
             return page
         delivery = 'delivery_status' if 'delivery_status' in columns else 'NULL'
         active_filter = ' AND expires_at > ?' if 'expires_at' in columns else ''
-        params = (upper_id, int(time.time())) if active_filter else (upper_id,)
+        params = (int(time.time()),) if active_filter else ()
         rows = db.execute(
-            f'SELECT rowid,sender,stamp,total,part,body,done,{delivery} FROM sms '
-            f'WHERE rowid <= ?{active_filter} ORDER BY rowid DESC LIMIT ?',
-            (*params, HISTORY_PAGE_SIZE + 1),
+            f'SELECT rowid,sender,stamp,ref,total,part,body,done,{delivery} FROM sms '
+            f'WHERE 1=1{active_filter} ORDER BY rowid',
+            params,
         ).fetchall()
 
-    page['records'] = [
-        {'sender': sender, 'time': sms_time(stamp), 'total': total, 'part': part,
-         'body': body, 'status': status or ('unknown' if done else 'pending')}
-        for _, sender, stamp, total, part, body, done, status in rows[:HISTORY_PAGE_SIZE]
-    ]
-    if len(rows) > HISTORY_PAGE_SIZE:
-        page['next_cursor'] = str(rows[HISTORY_PAGE_SIZE - 1][0])
+    groups = []
+    candidates = {}
+    for rowid, sender, stamp, ref, total, part, body, done, status in rows:
+        timestamp = parse_sms_time(stamp)
+        key = (sender, ref, total)
+        group = None
+        if ref is not None and total > 1:
+            for candidate in reversed(candidates.get(key, [])):
+                other = candidate['timestamp']
+                close = abs((timestamp - other).total_seconds()) <= 600 if timestamp and other else stamp == candidate['stamp']
+                if close and part not in candidate['parts']:
+                    group = candidate
+                    break
+        if group is None:
+            group = {'rowid': rowid, 'sender': sender, 'stamp': stamp, 'timestamp': timestamp,
+                     'total': total, 'parts': {}, 'statuses': []}
+            groups.append(group)
+            if ref is not None and total > 1:
+                candidates.setdefault(key, []).append(group)
+        group['rowid'] = max(group['rowid'], rowid)
+        group['parts'][part] = body
+        group['statuses'].append(status or ('unknown' if done else 'pending'))
+
+    groups = sorted((group for group in groups if group['rowid'] <= upper_id),
+                    key=lambda group: group['rowid'], reverse=True)
+    for group in groups[:HISTORY_PAGE_SIZE]:
+        parts = group['parts']
+        statuses = set(group['statuses'])
+        record = {
+            'sender': group['sender'], 'time': sms_time(group['stamp']), 'total': group['total'],
+            'body': ''.join(parts.get(index, '［缺少第 %d 段］' % index)
+                            for index in range(1, group['total'] + 1)),
+            'status': next(iter(statuses)) if len(statuses) == 1 else 'mixed',
+            'received_parts': len(parts),
+        }
+        proposed = page['records'] + [record]
+        if page['records'] and len(json.dumps(proposed, ensure_ascii=False).encode('utf-8')) > 48000:
+            break
+        page['records'].append(record)
+    if len(groups) > len(page['records']):
+        page['next_cursor'] = str(groups[len(page['records']) - 1]['rowid'])
     return page
 
 
@@ -441,7 +475,7 @@ if __name__ == '__main__':
             sys.exit(1)
     elif len(sys.argv) == 3 and sys.argv[1] == 'history':
         try:
-            print(json.dumps(sms_history(sys.argv[2])))
+            print(json.dumps(sms_history(sys.argv[2]), ensure_ascii=False))
         except (ValueError, sqlite3.Error) as error:
             print(str(error), file=sys.stderr)
             sys.exit(1)

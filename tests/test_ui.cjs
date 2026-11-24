@@ -5,7 +5,7 @@ let writes = [], commands = [], notifications = [];
 const pages = {
   latest: {
     records: [
-      { sender: '123', time: '2026-11-21T20:28:03+08:00', body: '<b>短信</b>', part: 1, total: 2, status: 'sent' },
+      { sender: '123', time: '2026-11-21T20:28:03+08:00', body: '<b>短信</b>', received_parts: 1, total: 2, status: 'sent' },
       { sender: '456', time: null, body: '测试', part: 1, total: 1, status: 'pending' }
     ],
     next_cursor: '25'
@@ -55,7 +55,7 @@ async function test() {
   assert.ok(cells().includes('<b>短信</b>'));
   assert.ok(cells().includes('已推送'));
   assert.ok(cells().includes('未推送'));
-  assert.ok(flatten(root).some(x => x.children.includes('第 1/2 段')));
+  assert.ok(flatten(root).some(x => x.children.includes('已收到 1/2 段')));
   assert.ok(button('较新记录').disabled);
   assert.ok(!button('较早记录').disabled);
   const panels = elements.filter(x => x.attrs.role === 'tabpanel');

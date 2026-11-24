@@ -103,6 +103,31 @@ class TestSMS(unittest.TestCase):
         self.assertEqual(service.sms_time('621112028230a0'), '2026-11-21T20:28:03-00:30')
         self.assertIsNone(service.sms_time('00000000000000'))
 
+    def test_history_combines_multipart_across_pages(self):
+        with tempfile.TemporaryDirectory() as directory, \
+             patch.object(service, 'DB', str(pathlib.Path(directory) / 'state.sqlite3')):
+            with closing(sqlite3.connect(service.DB)) as db:
+                service.init_db(db)
+                future = int(service.time.time()) + 3600
+                with db:
+                    db.execute('INSERT INTO sms VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                               ('part2', '123', '62111202823023', 42, 2, 2, '世界', 1, 'sent', future))
+                    for i in range(30):
+                        db.execute('INSERT INTO sms VALUES (?, ?, ?, NULL, 1, 1, ?, 1, ?, ?)',
+                                   ('single%d' % i, '456', '62111202823023', str(i), 'sent', future))
+                    db.execute('INSERT INTO sms VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                               ('part1', '123', '62111202824023', 42, 2, 1, '你好', 1, 'sent', future))
+                    db.execute('INSERT INTO sms VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                               ('partial', '789', '62111202823023', 11, 2, 2, '后段', 0, None, future))
+                first = service.sms_history('latest')
+                self.assertEqual(first['records'][0]['body'], '［缺少第 1 段］后段')
+                self.assertEqual(first['records'][0]['received_parts'], 1)
+                self.assertEqual(first['records'][1]['body'], '你好世界')
+                self.assertEqual(first['records'][1]['received_parts'], 2)
+                second = service.sms_history(first['next_cursor'])
+                self.assertEqual(len(first['records']) + len(second['records']), 32)
+                self.assertFalse(any(r['body'] == '世界' for r in second['records']))
+
     def test_outgoing_pdu_and_confirmation(self):
         modem = service.Modem()
         modem.fd = 12
