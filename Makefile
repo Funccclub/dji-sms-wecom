@@ -2,7 +2,7 @@ include $(TOPDIR)/rules.mk
 
 PKG_NAME:=dji-sms-wecom
 PKG_VERSION:=0.1.0
-PKG_RELEASE:=9
+PKG_RELEASE:=10
 PKG_LICENSE:=MIT
 include $(INCLUDE_DIR)/package.mk
 

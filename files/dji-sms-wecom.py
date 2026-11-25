@@ -21,6 +21,7 @@ import urllib.request
 CONFIG = '/etc/dji-sms-wecom.json'
 DB = '/etc/dji-sms-wecom-state.sqlite3'
 RETENTION_SECONDS = 7 * 24 * 60 * 60
+MODEM_SMS_LIMIT = 15
 HISTORY_PAGE_SIZE = 25
 MAX_ROW_ID = 2**63 - 1
 OUTBOX = '/tmp/dji-sms-wecom-outbox'
@@ -114,7 +115,7 @@ class Modem:
                 if b'\r\nOK\r\n' in data: return data.decode('ascii', 'replace')
                 if b'\r\nERROR\r\n' in data or b'+CMS ERROR:' in data: raise RuntimeError('AT command rejected: '+command)
         raise TimeoutError('AT command timed out: '+command)
-    def list_sms(self):
+    def list_sms_indexed(self):
         self.at('AT')
         mode = self.at('AT+CMGF?')
         if not re.search(r'\+CMGF:\s*[01]', mode): raise RuntimeError('unknown CMGF')
@@ -124,7 +125,29 @@ class Modem:
             result = self.at('AT+CMGL=4')
         finally:
             if old: self.at('AT+CMGF=1')
-        return re.findall(r'\+CMGL:\s*\d+,[^\r\n]*\r?\n([0-9A-Fa-f]+)', result)
+        return [(int(index), pdu) for index, pdu in
+                re.findall(r'\+CMGL:\s*(\d+),[^\r\n]*\r?\n([0-9A-Fa-f]+)', result)]
+
+    def list_sms(self):
+        return [pdu for _, pdu in self.list_sms_indexed()]
+
+    def delete_sms(self, index, expected_hash):
+        mode = self.at('AT+CMGF?')
+        match = re.search(r'\+CMGF:\s*([01])', mode)
+        if not match:
+            raise RuntimeError('unknown CMGF')
+        old = int(match.group(1))
+        try:
+            if old:
+                self.at('AT+CMGF=0')
+            result = self.at('AT+CMGR=%d' % index)
+            match = re.search(r'\+CMGR:[^\r\n]*\r?\n([0-9A-Fa-f]+)', result)
+            if not match or hashlib.sha256(bytes.fromhex(match.group(1))).hexdigest() != expected_hash:
+                raise RuntimeError('SMS changed before deletion')
+            self.at('AT+CMGD=%d' % index)
+        finally:
+            if old:
+                self.at('AT+CMGF=1')
 
     def submit_sms(self, number, content):
         encoded = content.encode('utf-16-be')
@@ -220,6 +243,44 @@ def poll(db, cfg):
             db.executemany("UPDATE sms SET done=1, delivery_status='sent' WHERE hash=?",
                            [(r[0],) for r in group])
         print('SMS forwarded (%d part(s))' % total, flush=True)
+
+
+def cleanup_modem(db):
+    with Modem() as modem:
+        records = modem.list_sms_indexed()
+        excess = len(records) - MODEM_SMS_LIMIT
+        if excess <= 0:
+            return
+
+        entries = []
+        for index, pdu in records:
+            digest = hashlib.sha256(bytes.fromhex(pdu)).hexdigest()
+            try:
+                message = decode_pdu(pdu)
+                timestamp = parse_sms_time(message['timestamp'])
+            except (ValueError, IndexError, UnicodeError):
+                message, timestamp = None, None
+            row = db.execute('SELECT expires_at FROM sms WHERE hash=?', (digest,)).fetchone()
+            expired = db.execute('SELECT 1 FROM expired_sms WHERE hash=?', (digest,)).fetchone()
+            if not timestamp and row and row[0]:
+                timestamp = datetime.fromtimestamp(row[0] - RETENTION_SECONDS, timezone.utc)
+            entry = {'index': index, 'hash': digest, 'time': timestamp, 'saved': bool(row or expired)}
+            entries.append(entry)
+
+        # Unknown timestamps are protected. Older records beyond the newest 15 are
+        # considered in chronological order, without replacing protected candidates
+        # with newer messages.
+        entries.sort(key=lambda entry: entry['time'].timestamp() if entry['time'] else float('inf'))
+        deleted = 0
+        for entry in entries[:excess]:
+            if not entry['saved'] or not entry['time']:
+                continue
+            modem.delete_sms(entry['index'], entry['hash'])
+            deleted += 1
+        if deleted:
+            print('Old modem SMS removed: %d' % deleted, flush=True)
+        if len(records) - deleted > MODEM_SMS_LIMIT:
+            print('Modem SMS retained above limit: records not yet saved or dated', flush=True)
 
 def init_db(db):
     db.execute('PRAGMA secure_delete=ON')
@@ -449,6 +510,8 @@ def main():
     while True:
         try: poll(db, cfg)
         except Exception as e: print('Poll failed:', type(e).__name__, str(e).split('?')[0], flush=True)
+        try: cleanup_modem(db)
+        except Exception as e: print('Modem cleanup failed:', type(e).__name__, str(e).split('?')[0], flush=True)
         time.sleep(max(10, int(cfg.get('poll_seconds',30))))
 
 if __name__ == '__main__':

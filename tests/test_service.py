@@ -1,4 +1,5 @@
 import importlib.util
+import hashlib
 import pathlib
 import sqlite3
 import sys
@@ -102,6 +103,67 @@ class TestSMS(unittest.TestCase):
     def test_history_time_zone_and_invalid_time(self):
         self.assertEqual(service.sms_time('621112028230a0'), '2026-11-21T20:28:03-00:30')
         self.assertIsNone(service.sms_time('00000000000000'))
+
+    def test_modem_cleanup_keeps_newest_and_preserves_local_pending(self):
+        messages = []
+        with self.db:
+            for i in range(18):
+                stamp = bytes.fromhex('6211120282%02x23' % ((i % 10) * 16 + i // 10))
+                pdu = deliver('短信 %d' % i, stamp=stamp)
+                digest = hashlib.sha256(bytes.fromhex(pdu)).hexdigest()
+                messages.append((i, pdu))
+                self.db.execute('INSERT INTO sms VALUES (?, ?, ?, NULL, 1, 1, ?, ?, ?, ?)',
+                                (digest, '1234', stamp.hex(), str(i), 0 if i == 1 else 1,
+                                 None if i == 1 else 'sent', 9999999999))
+        class FakeModem:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def list_sms_indexed(self): return list(messages)
+            def delete_sms(self, index, expected_hash):
+                item = next(item for item in messages if item[0] == index)
+                self_hash = hashlib.sha256(bytes.fromhex(item[1])).hexdigest()
+                if self_hash != expected_hash: raise RuntimeError('changed')
+                messages.remove(item)
+        with patch.object(service, 'Modem', FakeModem):
+            service.cleanup_modem(self.db)
+        self.assertEqual(len(messages), 15)
+        self.assertNotIn(1, [item[0] for item in messages])
+        self.assertEqual(self.db.execute('SELECT count(*) FROM sms WHERE done=0').fetchone()[0], 1)
+        self.assertNotIn(0, [item[0] for item in messages])
+        self.assertNotIn(2, [item[0] for item in messages])
+        self.assertIn(3, [item[0] for item in messages])
+
+    def test_modem_cleanup_keeps_incomplete_segment_in_database(self):
+        stamp = bytes.fromhex('62111202823023')
+        first = deliver('第一段', bytes([5, 0, 3, 42, 2, 1]), stamp)
+        digest = hashlib.sha256(bytes.fromhex(first)).hexdigest()
+        with self.db:
+            self.db.execute('INSERT INTO sms VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)',
+                            (digest, '1234', stamp.hex(), 42, 2, 1, '第一段', 1, 'baseline', 9999999999))
+        records = [(0, first)] + [(i, deliver(str(i), stamp=bytes.fromhex('62111212823023')))
+                                   for i in range(1, 16)]
+        deleted = []
+        class FakeModem:
+            def __enter__(self): return self
+            def __exit__(self, *args): pass
+            def list_sms_indexed(self): return records
+            def delete_sms(self, index, expected_hash): deleted.append((index, expected_hash))
+        with patch.object(service, 'Modem', FakeModem):
+            service.cleanup_modem(self.db)
+        self.assertEqual(deleted, [(0, digest)])
+        self.assertEqual(self.db.execute('SELECT body FROM sms WHERE hash=?', (digest,)).fetchone()[0], '第一段')
+
+    def test_modem_delete_checks_slot_before_deleting(self):
+        pdu = deliver('短信')
+        digest = hashlib.sha256(bytes.fromhex(pdu)).hexdigest()
+        modem = service.Modem()
+        with patch.object(modem, 'at', side_effect=['+CMGF: 0', '+CMGR: 1,,20\r\n' + pdu + '\r\nOK',
+                                                    '+CMGF: 0', '+CMGR: 1,,20\r\n' + pdu + '\r\nOK', 'OK']) as at:
+            with self.assertRaises(RuntimeError):
+                modem.delete_sms(4, '0' * 64)
+            self.assertNotIn('AT+CMGD=4', [call.args[0] for call in at.call_args_list])
+            modem.delete_sms(4, digest)
+            self.assertEqual(at.call_args_list[-1].args[0], 'AT+CMGD=4')
 
     def test_history_combines_multipart_across_pages(self):
         with tempfile.TemporaryDirectory() as directory, \
